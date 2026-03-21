@@ -15,6 +15,163 @@ Improvements over v1:
 import streamlit as st
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import datetime
+import json
+import sqlite3
+import io
+import os
+
+# =============================================================================
+#  DATABASE  — SQLite persistence for reports + images
+# =============================================================================
+
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dermascan.db")
+
+
+def get_conn() -> sqlite3.Connection:
+    """Return a thread-safe connection with row_factory set."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    """Create tables if they don't exist yet."""
+    with get_conn() as conn:
+        conn.executescript("""
+        PRAGMA journal_mode=WAL;
+
+        CREATE TABLE IF NOT EXISTS reports (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp     TEXT    NOT NULL,
+            risk_level    TEXT    NOT NULL,
+            risk_score    REAL    NOT NULL,
+            tds_baseline  REAL    NOT NULL,
+            tds_current   REAL    NOT NULL,
+            delta_tds     REAL    NOT NULL,
+            asymmetry_b   REAL, border_b   REAL, color_b   REAL, diameter_b   REAL,
+            asymmetry_c   REAL, border_c   REAL, color_c   REAL, diameter_c   REAL,
+            color_flags_b TEXT,   -- JSON list
+            color_flags_c TEXT,   -- JSON list
+            similarity    REAL,
+            confidence    REAL,
+            change_summary TEXT,
+            recommendation TEXT,
+            flags_json    TEXT,   -- JSON list of [title, detail] pairs
+            ok_flags_json TEXT    -- JSON list of strings
+        );
+
+        CREATE TABLE IF NOT EXISTS report_images (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id       INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+            img_baseline    BLOB,   -- JPEG bytes
+            img_current     BLOB,   -- JPEG bytes
+            img_seg_base    BLOB,   -- JPEG bytes  (segmentation overlay)
+            img_seg_curr    BLOB    -- JPEG bytes
+        );
+        """)
+
+
+def bgr_to_jpeg(bgr: np.ndarray, quality: int = 82) -> bytes:
+    """Encode a BGR ndarray to JPEG bytes for compact storage."""
+    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return buf.tobytes() if ok else b""
+
+
+def rgb_to_jpeg(rgb: np.ndarray, quality: int = 82) -> bytes:
+    """Encode an RGB ndarray to JPEG bytes."""
+    return bgr_to_jpeg(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), quality)
+
+
+def jpeg_to_rgb(blob: bytes) -> np.ndarray:
+    """Decode JPEG bytes back to an RGB ndarray for display."""
+    arr = np.frombuffer(blob, np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def save_report(data: dict, bgr1: np.ndarray, bgr2: np.ndarray) -> int:
+    """
+    Persist a full analysis result + images to SQLite.
+    Returns the new report id.
+    """
+    ab  = data["abcd_baseline"]
+    ac  = data["abcd_current"]
+    ts  = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Build segmentation overlay images
+    seg_base = overlay_mask(bgr1, ab["mask"])   # RGB ndarray
+    seg_curr = overlay_mask(bgr2, ac["mask"])
+
+    with get_conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO reports (
+                timestamp, risk_level, risk_score,
+                tds_baseline, tds_current, delta_tds,
+                asymmetry_b, border_b, color_b, diameter_b,
+                asymmetry_c, border_c, color_c, diameter_c,
+                color_flags_b, color_flags_c,
+                similarity, confidence,
+                change_summary, recommendation,
+                flags_json, ok_flags_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            ts, data["risk_level"], data["risk_score"],
+            ab["tds"], ac["tds"], data["delta_tds"],
+            ab["asymmetry"], ab["border"], ab["color"], ab["diameter"],
+            ac["asymmetry"], ac["border"], ac["color"], ac["diameter"],
+            json.dumps(ab["color_flags"]), json.dumps(ac["color_flags"]),
+            data["similarity_index"], data["confidence"],
+            data["change_summary"], data["recommendation"],
+            json.dumps(data["flags"]), json.dumps(data["ok_flags"]),
+        ))
+        report_id = cur.lastrowid
+
+        conn.execute("""
+            INSERT INTO report_images (report_id, img_baseline, img_current, img_seg_base, img_seg_curr)
+            VALUES (?,?,?,?,?)
+        """, (
+            report_id,
+            bgr_to_jpeg(bgr1),
+            bgr_to_jpeg(bgr2),
+            rgb_to_jpeg(seg_base),
+            rgb_to_jpeg(seg_curr),
+        ))
+
+    return report_id
+
+
+def load_all_reports() -> list[sqlite3.Row]:
+    """Return all report rows ordered oldest→newest."""
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM reports ORDER BY id ASC").fetchall()
+
+
+def load_report_images(report_id: int) -> sqlite3.Row | None:
+    """Return the image row for a given report id."""
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM report_images WHERE report_id=?", (report_id,)
+        ).fetchone()
+
+
+def delete_report(report_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM reports WHERE id=?", (report_id,))
+
+
+def delete_all_reports():
+    with get_conn() as conn:
+        conn.execute("DELETE FROM reports")
+        conn.execute("DELETE FROM report_images")
+
+
+# Initialise DB on every cold start
+init_db()
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -566,9 +723,50 @@ def pill(text, kind="ok"):
 # =============================================================================
 #  SESSION STATE
 # =============================================================================
-for key in ("cap_baseline", "cap_current"):
+# =============================================================================
+#  SESSION STATE INIT
+# =============================================================================
+for key, default in [
+    ("cap_baseline", None),
+    ("cap_current",  None),
+    ("camera_permitted", False),   # user has accepted camera permission
+]:
     if key not in st.session_state:
-        st.session_state[key] = None
+        st.session_state[key] = default
+
+
+# =============================================================================
+#  CAMERA PERMISSION GATE
+# =============================================================================
+
+def permission_gate():
+    """Show a permission prompt before opening the camera. Returns True when granted."""
+    if st.session_state["camera_permitted"]:
+        return True
+
+    st.markdown("""
+    <div class="card" style="max-width:540px;margin:2rem auto;text-align:center;border-color:rgba(94,234,212,.3)">
+      <div style="font-size:2.5rem;margin-bottom:.6rem">📷</div>
+      <div class="card-label" style="text-align:center">Camera Access Required</div>
+      <div class="explain" style="text-align:left;margin-bottom:1rem">
+        DermaScan AI needs access to your camera to take mole photos for analysis.
+        <br><br>
+        <strong>What we do:</strong><br>
+        • Photos are processed locally — nothing is uploaded to any server<br>
+        • Images are held only in your browser session and discarded when you close the tab<br>
+        • Your privacy is fully protected<br><br>
+        Click <strong>Allow Camera</strong> to continue, or use the <em>Upload Images</em> section below
+        if you prefer not to use your camera.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_a, col_b, col_c = st.columns([1, 2, 1])
+    with col_b:
+        if st.button("✅  Allow Camera Access", key="grant_cam"):
+            st.session_state["camera_permitted"] = True
+            st.rerun()
+    return False
 
 
 # =============================================================================
@@ -588,6 +786,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+cam_permitted = permission_gate()
+
 cam_col1, cam_col2 = st.columns(2, gap="large")
 for col, slot_key, label in [
     (cam_col1, "cap_baseline", "Baseline"),
@@ -595,11 +795,14 @@ for col, slot_key, label in [
 ]:
     with col:
         st.markdown(f'<div class="card"><div class="card-label">📷 {label} — Camera</div>', unsafe_allow_html=True)
-        snap = st.camera_input(f"Take {label} photo", key=f"cam_{label.lower()}")
-        if snap is not None:
-            bgr = load_camera_image(snap)
-            st.session_state[slot_key] = bgr
-            st.success(f"{label} captured ✅")
+        if cam_permitted:
+            snap = st.camera_input(f"Take {label} photo", key=f"cam_{label.lower()}")
+            if snap is not None:
+                bgr = load_camera_image(snap)
+                st.session_state[slot_key] = bgr
+                st.success(f"{label} captured ✅")
+        else:
+            st.markdown('<div class="explain" style="text-align:center;color:var(--muted)">🔒 Allow camera access above to enable live capture.</div>', unsafe_allow_html=True)
         if st.session_state[slot_key] is not None:
             st.markdown('<div style="margin-top:.6rem;font-family:\'DM Mono\',monospace;font-size:.65rem;letter-spacing:.15em;color:var(--accent)">CAPTURED PREVIEW</div>', unsafe_allow_html=True)
             st.image(bgr_to_rgb(st.session_state[slot_key]),
@@ -661,6 +864,13 @@ else:
             except Exception as e:
                 st.error(f"Analysis failed: {e}")
                 st.stop()
+
+        # ── Persist to SQLite ─────────────────────────────────────────────────
+        try:
+            saved_id = save_report(data, bgr1, bgr2)
+            st.toast(f"Report #{saved_id} saved to database ✅", icon="💾")
+        except Exception as db_err:
+            st.warning(f"Could not save to database: {db_err}")
 
         rl   = data["risk_level"]
         rs   = data["risk_score"]
@@ -890,3 +1100,255 @@ else:
         Always consult a qualified, board-certified dermatologist for evaluation of any skin lesion.
         Early professional assessment is the single most effective action for skin cancer prevention.
         </div>""", unsafe_allow_html=True)
+
+
+# =============================================================================
+#  HISTORY & TREND GRAPHS  (shown whenever ≥1 report exists)
+# =============================================================================
+
+# =============================================================================
+#  HISTORY & TREND GRAPHS  — reads directly from SQLite
+# =============================================================================
+
+all_reports = load_all_reports()
+
+if all_reports:
+    st.markdown("""
+    <div class="section-head" style="margin-top:3rem">
+      <div class="section-head-txt">📜 Report History & Trends</div>
+      <div class="section-head-line"></div>
+    </div>""", unsafe_allow_html=True)
+
+    # ── History table ─────────────────────────────────────────────────────────
+    st.markdown('<div class="card"><div class="card-label">All Saved Reports — Most Recent Last</div>', unsafe_allow_html=True)
+
+    RISK_EMOJI = {"LOW": "✅", "MODERATE": "⚡", "HIGH": "⚠️"}
+    header_html = (
+        "<table class='cmp-table'>"
+        "<tr><th>#</th><th>Date / Time</th><th>Risk</th><th>Score /10</th>"
+        "<th>TDS</th><th>ΔTDS</th><th>Asymmetry</th><th>Border</th>"
+        "<th>Colour</th><th>Diameter</th><th>Similarity</th><th>Conf.</th><th>Action</th></tr>"
+    )
+    rows_html = ""
+    for r in all_reports:
+        rl = r["risk_level"]
+        rc_col = {"LOW": "var(--low)", "MODERATE": "var(--mod)", "HIGH": "var(--high)"}.get(rl, "var(--text)")
+        d_col  = "var(--high)" if r["delta_tds"] > 0.1 else ("var(--low)" if r["delta_tds"] < -0.1 else "var(--muted)")
+        rows_html += (
+            f"<tr>"
+            f"<td style='color:var(--muted)'>{r['id']}</td>"
+            f"<td style='font-family:\"DM Mono\",monospace;font-size:.76rem'>{r['timestamp']}</td>"
+            f"<td style='color:{rc_col}'>{RISK_EMOJI.get(rl,'')} {rl}</td>"
+            f"<td style='font-family:\"DM Mono\",monospace;color:{rc_col}'>{r['risk_score']:.1f}</td>"
+            f"<td style='font-family:\"DM Mono\",monospace'>{r['tds_current']:.3f}</td>"
+            f"<td style='color:{d_col};font-family:\"DM Mono\",monospace'>{r['delta_tds']:+.3f}</td>"
+            f"<td>{r['asymmetry_c']:.2f}</td>"
+            f"<td>{r['border_c']:.2f}</td>"
+            f"<td>{r['color_c']:.0f}</td>"
+            f"<td>{r['diameter_c']:.2f}</td>"
+            f"<td>{r['similarity']:.1f}%</td>"
+            f"<td>{int(r['confidence']*100)}%</td>"
+            f"<td><a href='?view_id={r['id']}' target='_self' style='color:var(--accent);font-size:.75rem'>View</a></td>"
+            f"</tr>"
+        )
+    st.markdown(header_html + rows_html + "</table>", unsafe_allow_html=True)
+
+    col_del_all, _ = st.columns([1, 3])
+    with col_del_all:
+        if st.button("🗑  Delete All Reports", key="del_all"):
+            delete_all_reports()
+            st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Per-report image viewer ───────────────────────────────────────────────
+    st.markdown("""
+    <div class="section-head">
+      <div class="section-head-txt">🖼 Saved Image Viewer</div>
+      <div class="section-head-line"></div>
+    </div>""", unsafe_allow_html=True)
+
+    report_options = {f"Report #{r['id']} — {r['timestamp']}  [{r['risk_level']}]": r["id"]
+                      for r in reversed(all_reports)}
+    chosen_label = st.selectbox("Select a saved report to view its images:", list(report_options.keys()))
+    chosen_id    = report_options[chosen_label]
+    chosen_row   = next(r for r in all_reports if r["id"] == chosen_id)
+    imgs         = load_report_images(chosen_id)
+
+    if imgs:
+        ic1, ic2, ic3, ic4 = st.columns(4, gap="small")
+        with ic1:
+            st.image(jpeg_to_rgb(imgs["img_baseline"]),   caption="Baseline (original)",    use_container_width=True)
+        with ic2:
+            st.image(jpeg_to_rgb(imgs["img_seg_base"]),   caption="Baseline (segmented)",   use_container_width=True)
+        with ic3:
+            st.image(jpeg_to_rgb(imgs["img_current"]),    caption="Current (original)",     use_container_width=True)
+        with ic4:
+            st.image(jpeg_to_rgb(imgs["img_seg_curr"]),   caption="Current (segmented)",    use_container_width=True)
+
+        # Mini report card for chosen report
+        rc_c = {"LOW": "#34d399", "MODERATE": "#fbbf24", "HIGH": "#f87171"}.get(chosen_row["risk_level"], "#34d399")
+        cf_b = json.loads(chosen_row["color_flags_b"] or "[]")
+        cf_c = json.loads(chosen_row["color_flags_c"] or "[]")
+        st.markdown(f"""
+        <div class="card" style="margin-top:.8rem;border-color:{rc_c}33">
+          <div class="card-label">Report #{chosen_row['id']} summary — {chosen_row['timestamp']}</div>
+          <div style="display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:.8rem">
+            <div><span style="color:var(--muted);font-size:.75rem">Risk</span><br>
+              <span style="color:{rc_c};font-family:'DM Mono',monospace;font-size:1rem">{chosen_row['risk_level']}</span></div>
+            <div><span style="color:var(--muted);font-size:.75rem">Score</span><br>
+              <span style="font-family:'Fraunces',serif;font-size:1.4rem;color:{rc_c}">{chosen_row['risk_score']:.1f}</span></div>
+            <div><span style="color:var(--muted);font-size:.75rem">TDS (current)</span><br>
+              <span style="font-family:'DM Mono',monospace">{chosen_row['tds_current']:.3f}</span></div>
+            <div><span style="color:var(--muted);font-size:.75rem">ΔTDS</span><br>
+              <span style="font-family:'DM Mono',monospace;color:{'#f87171' if chosen_row['delta_tds']>0.1 else ('#34d399' if chosen_row['delta_tds']<-0.1 else 'var(--muted)')}">{chosen_row['delta_tds']:+.3f}</span></div>
+            <div><span style="color:var(--muted);font-size:.75rem">Similarity</span><br>
+              <span style="font-family:'DM Mono',monospace">{chosen_row['similarity']:.1f}%</span></div>
+            <div><span style="color:var(--muted);font-size:.75rem">Confidence</span><br>
+              <span style="font-family:'DM Mono',monospace">{int(chosen_row['confidence']*100)}%</span></div>
+          </div>
+          <div class="explain">{chosen_row['change_summary']}</div>
+          {'<div style="margin-top:.5rem;font-size:.78rem;color:var(--muted)">Baseline colours: ' + (", ".join(cf_b) if cf_b else "none") + ' &nbsp;·&nbsp; Current colours: ' + (", ".join(cf_c) if cf_c else "none") + '</div>' if cf_b or cf_c else ''}
+        </div>""", unsafe_allow_html=True)
+
+        del_col, _ = st.columns([1, 4])
+        with del_col:
+            if st.button(f"🗑  Delete Report #{chosen_id}", key=f"del_{chosen_id}"):
+                delete_report(chosen_id)
+                st.rerun()
+    else:
+        st.info("No images found for this report.")
+
+    # ── Trend graphs (need ≥2 rows) ───────────────────────────────────────────
+    if len(all_reports) >= 2:
+        st.markdown("""
+        <div class="section-head">
+          <div class="section-head-txt">📈 Metric Trends Over Time</div>
+          <div class="section-head-line"></div>
+        </div>""", unsafe_allow_html=True)
+
+        short_lbl = [f"#{r['id']}" for r in all_reports]
+        xs = range(len(all_reports))
+
+        # ── Theme colours ─────────────────────────────────────────────────────
+        BG      = "#0f1219"
+        SURFACE = "#161b26"
+        BORDER  = "#1f2535"
+        TEXT    = "#dde1f0"
+        MUTED   = "#5a6175"
+        ACCENT  = "#5eead4"
+        ACCENT2 = "#818cf8"
+        LOW_C   = "#34d399"
+        MOD_C   = "#fbbf24"
+        HIGH_C  = "#f87171"
+
+        def style_ax(ax):
+            ax.set_facecolor(SURFACE)
+            ax.tick_params(colors=MUTED, labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_edgecolor(BORDER)
+            ax.grid(True, color=BORDER, linewidth=0.6, linestyle="--", alpha=0.7)
+            ax.set_xticks(list(xs))
+            ax.set_xticklabels(short_lbl, color=MUTED, fontsize=8)
+
+        point_colors = [
+            {"LOW": LOW_C, "MODERATE": MOD_C, "HIGH": HIGH_C}.get(r["risk_level"], ACCENT)
+            for r in all_reports
+        ]
+
+        risk_scores = [r["risk_score"]  for r in all_reports]
+        tds_vals    = [r["tds_current"] for r in all_reports]
+        sim_vals    = [r["similarity"]  for r in all_reports]
+        delta_vals  = [r["delta_tds"]   for r in all_reports]
+
+        # ── Graph 1: Risk Score + TDS ─────────────────────────────────────────
+        fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 3.8))
+        fig1.patch.set_facecolor(BG)
+        style_ax(ax1); style_ax(ax2)
+
+        ax1.plot(xs, risk_scores, color=ACCENT, linewidth=2, zorder=2, alpha=0.85)
+        ax1.fill_between(xs, risk_scores, alpha=0.08, color=ACCENT)
+        for xi, yi, pc in zip(xs, risk_scores, point_colors):
+            ax1.scatter(xi, yi, color=pc, s=60, zorder=3, edgecolors="none")
+        ax1.axhspan(0,   4.5, alpha=0.04, color=LOW_C)
+        ax1.axhspan(4.5, 6.8, alpha=0.04, color=MOD_C)
+        ax1.axhspan(6.8, 10,  alpha=0.04, color=HIGH_C)
+        ax1.set_ylim(0, 10)
+        ax1.set_title("Risk Score Over Sessions", color=TEXT, fontsize=10, pad=8)
+        ax1.set_ylabel("Risk Score (0–10)", color=MUTED, fontsize=8)
+        ax1.yaxis.set_major_locator(mticker.MultipleLocator(2))
+
+        ax2.plot(xs, tds_vals, color=ACCENT2, linewidth=2, zorder=2, alpha=0.85)
+        ax2.fill_between(xs, tds_vals, alpha=0.08, color=ACCENT2)
+        for xi, yi, pc in zip(xs, tds_vals, point_colors):
+            ax2.scatter(xi, yi, color=pc, s=60, zorder=3, edgecolors="none")
+        ax2.axhline(4.75, color=MOD_C, linewidth=1, linestyle="--", alpha=0.5, label="Moderate (4.75)")
+        ax2.axhline(5.45, color=HIGH_C, linewidth=1, linestyle="--", alpha=0.5, label="High (5.45)")
+        ax2.legend(fontsize=7, facecolor=SURFACE, edgecolor=BORDER, labelcolor=MUTED)
+        ax2.set_title("Total Dermoscopy Score (TDS)", color=TEXT, fontsize=10, pad=8)
+        ax2.set_ylabel("TDS", color=MUTED, fontsize=8)
+
+        fig1.tight_layout(pad=1.5)
+        st.pyplot(fig1, use_container_width=True)
+        plt.close(fig1)
+
+        # ── Graph 2: ABCD metrics ─────────────────────────────────────────────
+        fig2, axes2 = plt.subplots(1, 4, figsize=(14, 3.4))
+        fig2.patch.set_facecolor(BG)
+
+        abcd_metrics = [
+            ("asymmetry_c", "Asymmetry", 2, "#7eb8f7"),
+            ("border_c",    "Border",    8, "#b07ef7"),
+            ("color_c",     "Colour",    6, MOD_C),
+            ("diameter_c",  "Diameter",  5, LOW_C),
+        ]
+        for ax, (field, name, ymax, color) in zip(axes2, abcd_metrics):
+            style_ax(ax)
+            ax.set_ylim(0, ymax)
+            ax.set_title(name, color=TEXT, fontsize=9, pad=6)
+            vals = [r[field] for r in all_reports]
+            ax.plot(xs, vals, color=color, linewidth=2, alpha=0.85, zorder=2)
+            ax.fill_between(xs, vals, alpha=0.12, color=color)
+            for xi, yi, pc in zip(xs, vals, point_colors):
+                ax.scatter(xi, yi, color=pc, s=45, zorder=3, edgecolors="none")
+
+        fig2.suptitle("ABCD Metrics Across Sessions", color=TEXT, fontsize=11, y=1.02)
+        fig2.tight_layout(pad=1.2)
+        st.pyplot(fig2, use_container_width=True)
+        plt.close(fig2)
+
+        # ── Graph 3: Similarity + ΔTDS ────────────────────────────────────────
+        fig3, (ax_sim, ax_delta) = plt.subplots(1, 2, figsize=(12, 3.4))
+        fig3.patch.set_facecolor(BG)
+        style_ax(ax_sim); style_ax(ax_delta)
+
+        ax_sim.plot(xs, sim_vals, color=ACCENT, linewidth=2, alpha=0.85)
+        ax_sim.fill_between(xs, sim_vals, alpha=0.08, color=ACCENT)
+        ax_sim.axhline(80, color=LOW_C, linewidth=1, linestyle="--", alpha=0.5, label="High (80%)")
+        ax_sim.axhline(65, color=MOD_C, linewidth=1, linestyle="--", alpha=0.5, label="Moderate (65%)")
+        for xi, yi, pc in zip(xs, sim_vals, point_colors):
+            ax_sim.scatter(xi, yi, color=pc, s=45, zorder=3, edgecolors="none")
+        ax_sim.set_ylim(0, 100)
+        ax_sim.set_title("Visual Similarity %", color=TEXT, fontsize=10, pad=8)
+        ax_sim.set_ylabel("Similarity %", color=MUTED, fontsize=8)
+        ax_sim.legend(fontsize=7, facecolor=SURFACE, edgecolor=BORDER, labelcolor=MUTED)
+
+        bar_colors = [HIGH_C if d > 0.1 else (LOW_C if d < -0.1 else MUTED) for d in delta_vals]
+        ax_delta.bar(list(xs), delta_vals, color=bar_colors, alpha=0.75, zorder=2)
+        ax_delta.axhline(0, color=TEXT, linewidth=0.8, alpha=0.4)
+        ax_delta.set_title("TDS Change vs Baseline (ΔTDS)", color=TEXT, fontsize=10, pad=8)
+        ax_delta.set_ylabel("ΔTDS", color=MUTED, fontsize=8)
+        ax_delta.tick_params(colors=MUTED)
+
+        fig3.tight_layout(pad=1.5)
+        st.pyplot(fig3, use_container_width=True)
+        plt.close(fig3)
+
+        legend_md = "  ".join([f"`#{r['id']}` = {r['timestamp']}" for r in all_reports])
+        st.markdown(
+            f'<div style="font-size:.72rem;color:var(--muted);margin-top:.3rem">Session labels: {legend_md}</div>',
+            unsafe_allow_html=True
+        )
+
+    else:
+        st.info("Run at least **2 analyses** to see trend graphs.", icon="📈")
