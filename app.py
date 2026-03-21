@@ -709,8 +709,10 @@ for col, slot_key, dist_key, label in [
                     st.success(f"{label} captured at {dist:.1f} cm ✅")
         if st.session_state[slot_key] is not None:
             st.markdown('<div style="margin-top:.6rem;font-family:\'DM Mono\',monospace;font-size:.65rem;letter-spacing:.15em;color:var(--accent)">CAPTURED PREVIEW</div>', unsafe_allow_html=True)
+            _dist_val = st.session_state.get(dist_key)
+            _caption  = f"{label} — {_dist_val:.1f} cm" if _dist_val is not None else label
             st.image(bgr_to_rgb(st.session_state[slot_key]),
-                     caption=f"{label} — {st.session_state[dist_key]:.1f} cm",
+                     caption=_caption,
                      use_container_width=True)
             if st.button(f"🗑  Clear {label}", key=f"clear_{label.lower()}"):
                 st.session_state[slot_key] = None; st.session_state[dist_key] = None; st.rerun()
