@@ -15,9 +15,6 @@ Improvements over v1:
 import streamlit as st
 import cv2
 import numpy as np
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
-import av
-import threading
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -159,7 +156,7 @@ st.markdown("""
 <div class="hero">
   <div class="hero-title">DermaScan AI</div>
   <div class="hero-sub">Mole Tracking · ABCD Analysis · Similarity Index</div>
-  <div class="hero-badge">📡 Distance-Guided Capture · OpenCV · Research Tool</div>
+  <div class="hero-badge">📸 Camera Capture · OpenCV · Research Tool</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -167,104 +164,16 @@ st.markdown("""
 # =============================================================================
 #  CONSTANTS
 # =============================================================================
-TARGET_CM      = 10
-TOLERANCE_CM   = 2.5
-REF_AREA_RATIO = 0.18
-REF_DISTANCE   = TARGET_CM
-
-
 # =============================================================================
-#  DISTANCE ESTIMATION
+#  CAMERA INPUT HELPERS  (st.camera_input replaces WebRTC)
 # =============================================================================
 
-def estimate_distance_cm(bgr: np.ndarray) -> float:
-    hsv  = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    lo   = np.array([0,  20,  60], np.uint8)
-    hi   = np.array([25, 255, 255], np.uint8)
-    mask = cv2.inRange(hsv, lo, hi)
-    lo2  = np.array([160, 20, 60], np.uint8)
-    hi2  = np.array([180, 255, 255], np.uint8)
-    mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lo2, hi2))
-    k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
-    area_px  = float(np.count_nonzero(mask))
-    total_px = float(bgr.shape[0] * bgr.shape[1])
-    if total_px == 0 or area_px == 0:
-        return TARGET_CM
-    ratio = area_px / total_px
-    dist  = REF_DISTANCE * np.sqrt(REF_AREA_RATIO / (ratio + 1e-6))
-    return float(np.clip(dist, 2.0, 50.0))
+TARGET_CM_HINT = 10   # informational only — shown to user as guidance
 
-
-def distance_status(dist_cm: float) -> tuple:
-    diff = dist_cm - TARGET_CM
-    if abs(diff) <= TOLERANCE_CM:
-        return f"✅  {dist_cm:.1f} cm — GOOD", "#34d399", "dist-ok", True
-    elif diff > 0:
-        return f"🔴  {dist_cm:.1f} cm — TOO FAR (move closer)", "#f87171", "dist-bad", False
-    else:
-        return f"🟡  {dist_cm:.1f} cm — TOO CLOSE (move back)", "#fbbf24", "dist-warn", False
-
-
-# =============================================================================
-#  WEBCAM
-# =============================================================================
-
-RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
-
-
-class MoleWebcam(VideoTransformerBase):
-    def __init__(self):
-        self.latest_frame   = None
-        self.latest_dist_cm = TARGET_CM
-        self.lock = threading.Lock()
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        bgr = frame.to_ndarray(format="bgr24")
-        dist_cm = estimate_distance_cm(bgr)
-        _, _, css, ok = distance_status(dist_cm)
-        h, w = bgr.shape[:2]
-        out  = bgr.copy()
-        cx, cy = w // 2, h // 2
-        r = min(w, h) // 6
-        color = (94, 234, 212) if ok else (248, 113, 113)  # BGR approximation
-        for angle in range(0, 360, 20):
-            if angle % 40 < 20:
-                a1 = np.deg2rad(angle); a2 = np.deg2rad(angle + 18)
-                p1 = (int(cx + (r+18)*np.cos(a1)), int(cy + (r+18)*np.sin(a1)))
-                p2 = (int(cx + (r+18)*np.cos(a2)), int(cy + (r+18)*np.sin(a2)))
-                cv2.line(out, p1, p2, color, 1, cv2.LINE_AA)
-        cv2.circle(out, (cx, cy), r, color, 2, cv2.LINE_AA)
-        gap = 12
-        cv2.line(out, (cx-r-20, cy), (cx-gap, cy),  color, 1, cv2.LINE_AA)
-        cv2.line(out, (cx+gap,   cy), (cx+r+20, cy), color, 1, cv2.LINE_AA)
-        cv2.line(out, (cx, cy-r-20), (cx, cy-gap),   color, 1, cv2.LINE_AA)
-        cv2.line(out, (cx, cy+gap),  (cx, cy+r+20),  color, 1, cv2.LINE_AA)
-        blen = 20
-        for (bx, by, sx, sy) in [(10,10,1,1),(w-10,10,-1,1),(10,h-10,1,-1),(w-10,h-10,-1,-1)]:
-            cv2.line(out, (bx, by), (bx+sx*blen, by), color, 2)
-            cv2.line(out, (bx, by), (bx, by+sy*blen), color, 2)
-        overlay = out.copy()
-        cv2.rectangle(overlay, (0, 0), (w, 44), (7, 9, 15), -1)
-        cv2.addWeighted(overlay, 0.65, out, 0.35, 0, out)
-        dist_txt = f"Distance: {dist_cm:.1f} cm"
-        tgt_txt  = f"Target: {TARGET_CM} cm ±{TOLERANCE_CM} cm"
-        cv2.putText(out, dist_txt, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
-        cv2.putText(out, tgt_txt, (w-260, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (90,97,117), 1, cv2.LINE_AA)
-        overlay2 = out.copy()
-        cv2.rectangle(overlay2, (0, h-40), (w, h), (7, 9, 15), -1)
-        cv2.addWeighted(overlay2, 0.65, out, 0.35, 0, out)
-        status_str = "READY — distance OK" if ok else "ADJUST DISTANCE"
-        cv2.putText(out, status_str, (cx-130, h-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
-        with self.lock:
-            self.latest_frame   = bgr.copy()
-            self.latest_dist_cm = dist_cm
-        return av.VideoFrame.from_ndarray(out, format="bgr24")
-
-    def get_snapshot(self):
-        with self.lock:
-            return (self.latest_frame.copy() if self.latest_frame is not None else None,
-                    self.latest_dist_cm)
+def load_camera_image(camera_file) -> np.ndarray:
+    """Decode an st.camera_input snapshot into a BGR numpy array."""
+    raw = np.frombuffer(camera_file.getvalue(), np.uint8)
+    return cv2.imdecode(raw, cv2.IMREAD_COLOR)
 
 
 # =============================================================================
@@ -657,7 +566,7 @@ def pill(text, kind="ok"):
 # =============================================================================
 #  SESSION STATE
 # =============================================================================
-for key in ("cap_baseline", "cap_current", "dist_baseline", "dist_current"):
+for key in ("cap_baseline", "cap_current"):
     if key not in st.session_state:
         st.session_state[key] = None
 
@@ -668,54 +577,35 @@ for key in ("cap_baseline", "cap_current", "dist_baseline", "dist_current"):
 
 st.markdown("""
 <div class="section-head">
-  <div class="section-head-txt">📷 Step 1 — Webcam Capture</div>
+  <div class="section-head-txt">📷 Step 1 — Camera Capture</div>
   <div class="section-head-line"></div>
 </div>
 """, unsafe_allow_html=True)
 st.markdown(
     f'<div style="color:var(--muted);font-size:.85rem;margin-bottom:1.2rem">'
-    f'Hold your camera <strong>{TARGET_CM} cm</strong> from the mole. Capture only when the indicator turns <span style="color:#34d399">green</span>.'
-    f'</div>', unsafe_allow_html=True
+    f'Hold your camera approximately <strong>{TARGET_CM_HINT} cm</strong> from the mole — '
+    f'the mole should fill most of the frame. Click the shutter button to capture.</div>',
+    unsafe_allow_html=True
 )
 
 cam_col1, cam_col2 = st.columns(2, gap="large")
-for col, slot_key, dist_key, label in [
-    (cam_col1, "cap_baseline", "dist_baseline", "Baseline"),
-    (cam_col2, "cap_current",  "dist_current",  "Current"),
+for col, slot_key, label in [
+    (cam_col1, "cap_baseline", "Baseline"),
+    (cam_col2, "cap_current",  "Current"),
 ]:
     with col:
-        st.markdown(f'<div class="card"><div class="card-label">📡 {label} — Live Camera</div>', unsafe_allow_html=True)
-        ctx = webrtc_streamer(
-            key=f"webcam_{label.lower()}",
-            video_transformer_factory=MoleWebcam,
-            rtc_configuration=RTC_CONFIG,
-            media_stream_constraints={"video": {"width": 640, "height": 480}, "audio": False},
-            async_processing=True,
-        )
-        if ctx.video_transformer:
-            _, dist_cm = ctx.video_transformer.get_snapshot()
-            label_txt, col_hex, css, ok = distance_status(dist_cm)
-            st.markdown(
-                f'<div style="margin:.5rem 0;padding:.5rem .8rem;background:var(--surface2);'
-                f'border-radius:8px;font-family:\'DM Mono\',monospace;font-size:.82rem;">'
-                f'<span class="{css}">{label_txt}</span></div>',
-                unsafe_allow_html=True
-            )
-            if st.button(f"📸  Capture {label}", key=f"btn_{label.lower()}", disabled=not ok):
-                frame, dist = ctx.video_transformer.get_snapshot()
-                if frame is not None:
-                    st.session_state[slot_key] = frame
-                    st.session_state[dist_key] = dist
-                    st.success(f"{label} captured at {dist:.1f} cm ✅")
+        st.markdown(f'<div class="card"><div class="card-label">📷 {label} — Camera</div>', unsafe_allow_html=True)
+        snap = st.camera_input(f"Take {label} photo", key=f"cam_{label.lower()}")
+        if snap is not None:
+            bgr = load_camera_image(snap)
+            st.session_state[slot_key] = bgr
+            st.success(f"{label} captured ✅")
         if st.session_state[slot_key] is not None:
             st.markdown('<div style="margin-top:.6rem;font-family:\'DM Mono\',monospace;font-size:.65rem;letter-spacing:.15em;color:var(--accent)">CAPTURED PREVIEW</div>', unsafe_allow_html=True)
-            _dist_val = st.session_state.get(dist_key)
-            _caption  = f"{label} — {_dist_val:.1f} cm" if _dist_val is not None else label
             st.image(bgr_to_rgb(st.session_state[slot_key]),
-                     caption=_caption,
-                     use_container_width=True)
+                     caption=label, use_container_width=True)
             if st.button(f"🗑  Clear {label}", key=f"clear_{label.lower()}"):
-                st.session_state[slot_key] = None; st.session_state[dist_key] = None; st.rerun()
+                st.session_state[slot_key] = None; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -970,15 +860,13 @@ else:
           <div class="section-head-line"></div>
         </div>""", unsafe_allow_html=True)
 
-        d1 = st.session_state.get("dist_baseline")
-        d2 = st.session_state.get("dist_current")
         c1, c2, c3, c4 = st.columns(4, gap="small")
         with c1:
-            st.image(bgr_to_rgb(bgr1), caption=f"Baseline original{' — '+str(round(d1,1))+' cm' if d1 else ''}", use_container_width=True)
+            st.image(bgr_to_rgb(bgr1), caption="Baseline (original)", use_container_width=True)
         with c2:
             st.image(overlay_mask(bgr1, data["abcd_baseline"]["mask"]), caption="Baseline — detected lesion (teal overlay)", use_container_width=True)
         with c3:
-            st.image(bgr_to_rgb(bgr2), caption=f"Current original{' — '+str(round(d2,1))+' cm' if d2 else ''}", use_container_width=True)
+            st.image(bgr_to_rgb(bgr2), caption="Current (original)", use_container_width=True)
         with c4:
             st.image(overlay_mask(bgr2, data["abcd_current"]["mask"]), caption="Current — detected lesion (teal overlay)", use_container_width=True)
 
