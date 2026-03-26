@@ -94,12 +94,12 @@ for col, slot, label in [(c1,"cap_baseline","Baseline"), (c2,"cap_current","Curr
     with col:
         st.markdown(f'<div class="card"><div class="card-label">📷 {label}</div>', unsafe_allow_html=True)
         if st.session_state["camera_permitted"]:
-            snap = st.camera_input(f"Take {label} photo", key=f"cam_{label.lower()}")
+           snap = st.camera_input(f"Take {label} photo", key=f"cam_{label.lower()}")
            if snap is not None:
-                st.session_state[slot] = load_camera_image(snap)
-                st.success(f"{label} captured ✅")
-        else:
-            st.markdown('<div class="explain" style="text-align:center;color:var(--muted)">🔒 Allow camera above to use live capture</div>', unsafe_allow_html=True)
+              st.session_state[slot] = load_camera_image(snap)
+              st.success(f"{label} captured ✅")
+           else:
+              st.markdown('<div class="explain" style="text-align:center;color:var(--muted)">🔒 Allow camera above to use live capture</div>', unsafe_allow_html=True)
         if st.session_state[slot] is not None:
             st.markdown('<div style="font-size:.65rem;font-family:\'DM Mono\',monospace;color:var(--accent);letter-spacing:.15em;text-transform:uppercase;margin-top:.5rem">Preview</div>', unsafe_allow_html=True)
             st.image(bgr_to_rgb(st.session_state[slot]), caption=label, use_container_width=True)
@@ -119,15 +119,13 @@ for col, slot, label in [(u1,"cap_baseline","Baseline"), (u2,"cap_current","Curr
     with col:
         st.markdown(f'<div class="card"><div class="card-label">📂 {label} Upload</div>', unsafe_allow_html=True)
         f = st.file_uploader(f"Upload {label.lower()} photo", type=["jpg","jpeg","png","webp"], key=f"up_{label.lower()}")
-       if f is not None:
+        if f is not None:
             bgr = load_uploaded(f)
             st.session_state[slot] = bgr
             st.image(bgr_to_rgb(bgr), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-      if bgr1 is None or bgr2 is None:
-            st.error("Images not loaded correctly.")
-            st.stop()
+     
 
 # ── Step 3: Analyse ───────────────────────────────────────────────────────────
 st.markdown("""
