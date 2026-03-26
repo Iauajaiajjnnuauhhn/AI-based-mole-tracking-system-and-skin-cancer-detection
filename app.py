@@ -1,168 +1,107 @@
+"""
+DermaScan AI — app.py
+Login & Registration entry point.
+After login, patient is routed via st.navigation to Home / Scanner / History.
+"""
+
 import streamlit as st
-import tensorflow as tf
-import numpy as np
-import cv2
-import sqlite3
-from datetime import datetime
-from PIL import Image
-from sklearn.cluster import KMeans
-import matplotlib.pyplot as plt
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
 
-# ------------------ LOAD MODEL ------------------
-model = tf.keras.models.load_model("model/skin_model.h5")
+import db
+import styles
 
-# ------------------ DATABASE ------------------
-def init_db():
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            prediction TEXT,
-            confidence REAL,
-            asymmetry REAL,
-            border REAL,
-            color REAL,
-            diameter REAL
-        )
-    """)
-    conn.commit()
-    conn.close()
+st.set_page_config(
+    page_title="DermaScan AI",
+    page_icon="🔬",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+styles.inject(st)
 
-init_db()
+# ── Session state defaults ────────────────────────────────────────────────────
+for k, v in [("patient", None), ("auth_tab", "login")]:
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ------------------ PREPROCESS ------------------
-def preprocess(img):
-    img = cv2.resize(img, (224,224))
-    img = img / 255.0
-    return np.reshape(img, (1,224,224,3))
+# ── If already logged in → navigate ──────────────────────────────────────────
+if st.session_state["patient"]:
+    patient = st.session_state["patient"]
 
-# ------------------ SEGMENT ------------------
-def segment_mole(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-    _, thresh = cv2.threshold(blur, 0, 255,
-                              cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    return thresh
+    home_page    = st.Page("pages/home.py",    title="Home",           icon="🏠")
+    scanner_page = st.Page("pages/scanner.py", title="Run Scanner",    icon="🔬")
+    history_page = st.Page("pages/history.py", title="Report History", icon="📜")
 
-# ------------------ ABCD ------------------
-def asymmetry(mask):
-    h, w = mask.shape
-    left = mask[:, :w//2]
-    right = cv2.flip(mask[:, w//2:], 1)
-    diff = cv2.absdiff(left, right)
-    return np.sum(diff)/(h*w)
+    nav = st.navigation([home_page, scanner_page, history_page])
+    nav.run()
+    st.stop()
 
-def border(mask):
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnt = max(contours, key=cv2.contourArea)
-    peri = cv2.arcLength(cnt, True)
-    area = cv2.contourArea(cnt)
-    circularity = (4*np.pi*area)/(peri*peri)
-    return 1 - circularity
+# ── Auth page ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero">
+  <div class="hero-title">DermaScan AI</div>
+  <div class="hero-sub">AI-Powered Mole Tracking · ABCD Analysis · Similarity Index</div>
+  <div class="hero-badge">🔬 Powered by OpenCV · SQLite · Streamlit</div>
+</div>
+""", unsafe_allow_html=True)
 
-def color_var(image, mask):
-    pixels = image[mask > 0]
-    if len(pixels) < 10:
-        return 1
-    kmeans = KMeans(n_clusters=3).fit(pixels)
-    return len(set(kmeans.labels_))
+col_l, col_m, col_r = st.columns([1, 1.4, 1])
+with col_m:
+    tab_login, tab_reg = st.tabs(["🔑  Sign In", "✨  Create Account"])
 
-def diameter(mask):
-    area = np.sum(mask > 0)
-    return np.sqrt(4*area/np.pi)
+    # ── LOGIN ─────────────────────────────────────────────────────────────────
+    with tab_login:
+        st.markdown('<div style="height:.5rem"></div>', unsafe_allow_html=True)
+        pid_in  = st.text_input("Patient ID", placeholder="DS-XXXX", key="li_pid")
+        pass_in = st.text_input("Password",   type="password",        key="li_pass")
 
-# ------------------ SAVE ------------------
-def save_record(pred, conf, A, B, C, D):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO records (date, prediction, confidence, asymmetry, border, color, diameter)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        datetime.now().strftime("%Y-%m-%d"),
-        pred, conf, A, B, C, D
-    ))
-    conn.commit()
-    conn.close()
+        if st.button("Sign In", key="btn_login"):
+            if not pid_in or not pass_in:
+                st.error("Please enter both Patient ID and password.")
+            else:
+                row = db.login_patient(pid_in, pass_in)
+                if row:
+                    st.session_state["patient"] = dict(row)
+                    st.rerun()
+                else:
+                    st.error("Invalid Patient ID or password.")
 
-# ------------------ LOAD HISTORY ------------------
-def load_history():
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT date, diameter FROM records")
-    data = cursor.fetchall()
-    conn.close()
-    return data
+        st.markdown("""
+        <div style="margin-top:1.2rem;padding:.8rem;background:var(--surface2);
+          border-radius:10px;font-size:.78rem;color:var(--muted);text-align:center">
+          Don't have an account? Switch to <strong>Create Account</strong> above.
+        </div>""", unsafe_allow_html=True)
 
-# ------------------ UI ------------------
-st.title("🧠 Skin Cancer Detection & Tracking")
-st.write("Upload or capture a mole image")
+    # ── REGISTER ──────────────────────────────────────────────────────────────
+    with tab_reg:
+        st.markdown('<div style="height:.5rem"></div>', unsafe_allow_html=True)
+        reg_name  = st.text_input("Full Name",        placeholder="e.g. Amara Silva",  key="reg_name")
+        reg_email = st.text_input("Email (optional)", placeholder="you@email.com",      key="reg_email")
+        reg_dob   = st.text_input("Date of Birth (optional)", placeholder="YYYY-MM-DD", key="reg_dob")
+        reg_pass  = st.text_input("Password",         type="password",                  key="reg_pass")
+        reg_pass2 = st.text_input("Confirm Password", type="password",                  key="reg_pass2")
 
-uploaded = st.file_uploader("Upload Image", type=["jpg","png"])
-camera = st.camera_input("Take Photo")
+        if st.button("Create Account", key="btn_register"):
+            if not reg_name or not reg_pass:
+                st.error("Name and password are required.")
+            elif reg_pass != reg_pass2:
+                st.error("Passwords do not match.")
+            elif len(reg_pass) < 6:
+                st.error("Password must be at least 6 characters.")
+            else:
+                try:
+                    pid = db.register_patient(reg_name, reg_pass, reg_email, reg_dob)
+                    row = db.login_patient(pid, reg_pass)
+                    st.session_state["patient"] = dict(row)
+                    st.success(f"Account created! Your Patient ID is **{pid}** — save this to log in next time.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Registration failed: {e}")
 
-image = None
-
-# ✅ FIX: check Streamlit objects, not NumPy arrays
-if uploaded is not None:
-    image = Image.open(uploaded)
-elif camera is not None:
-    image = Image.open(camera)
-
-if image is not None:
-    st.image(image, caption="Input Image", use_column_width=True)
-    img = np.array(image)
-
-    # Prediction
-    processed = preprocess(img)
-    pred_val = model.predict(processed)[0][0]
-    prediction = "⚠️ Suspicious" if pred_val > 0.5 else "✅ Benign"
-
-    # ABCD Analysis
-    mask = segment_mole(img)
-    A = asymmetry(mask)
-    B = border(mask)
-    C = color_var(img, mask)
-    D = diameter(mask)
-    score = (A*1.3) + (B*0.1) + (C*0.5) + (D*0.05)
-
-    # Save record
-    save_record(prediction, float(pred_val), A, B, C, D)
-
-    # Display results
-    st.subheader("📊 Result")
-    st.write(prediction)
-    st.write(f"Confidence: {pred_val:.2f}")
-
-    st.subheader("🧪 ABCD Analysis")
-    st.write(f"Asymmetry: {A:.2f}")
-    st.write(f"Border: {B:.2f}")
-    st.write(f"Color: {C}")
-    st.write(f"Diameter: {D:.2f}")
-
-    st.subheader("📈 Risk Score")
-    st.write(score)
-    if score > 6:
-        st.error("🚨 High Risk - Consult a doctor")
-    elif score > 4:
-        st.warning("⚠️ Moderate Risk")
-    else:
-        st.success("✅ Low Risk")
-
-    st.image(mask, caption="Segmented Mole")
-
-# ------------------ HISTORY GRAPH ------------------
-st.subheader("📈 Mole Growth Tracking")
-history = load_history()
-if history:
-    dates = [h[0] for h in history]
-    diameters = [h[1] for h in history]
-    plt.plot(dates, diameters)
-    plt.xticks(rotation=45)
-    plt.title("Diameter Over Time")
-    st.pyplot(plt)
-
-# ------------------ DISCLAIMER ------------------
-st.warning("⚠️ This is not a medical diagnosis. Consult a dermatologist.")
+        st.markdown("""
+        <div style="margin-top:1.2rem;padding:.9rem;background:var(--surface2);
+          border-radius:10px;font-size:.78rem;color:var(--muted)">
+          <strong style="color:var(--accent)">📌 Save your Patient ID!</strong><br>
+          After registration, you'll receive a unique Patient ID like <code>DS-4F2A</code>.
+          Write it down — you'll need it to log in from any device.
+        </div>""", unsafe_allow_html=True)
