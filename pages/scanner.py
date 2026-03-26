@@ -125,9 +125,9 @@ for col, slot, label in [(u1,"cap_baseline","Baseline"), (u2,"cap_current","Curr
             st.image(bgr_to_rgb(bgr), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-if bgr1 is None or bgr2 is None:
-    st.error("Images not loaded correctly.")
-    st.stop()
+      if bgr1 is None or bgr2 is None:
+            st.error("Images not loaded correctly.")
+            st.stop()
 
 # ── Step 3: Analyse ───────────────────────────────────────────────────────────
 st.markdown("""
