@@ -319,79 +319,90 @@ def overlay_mask(bgr, mask):
 
 def analyse_pair(bgr1, bgr2):
     res = {}
-    for key, bgr in [("baseline", bgr1), ("current", bgr2)]:
-        mask            = segment_lesion(bgr)
-        conf            = segmentation_confidence(mask, bgr)
-        a               = compute_asymmetry(mask)
-        b               = compute_border(mask)
-        c_score, c_flags = compute_color(bgr, mask)
-        d               = compute_diameter(mask)
-        t               = tds(a, b, c_score, d)
-        rs, rl          = risk_from_tds(t, conf)
-        res[key] = {"asymmetry": a, "border": b, "color": c_score, "color_flags": c_flags,
-                    "diameter": d, "tds": t, "mask": mask, "conf": conf,
-                    "risk_score": rs, "risk_level": rl}
 
-    sim   = similarity_index(bgr1, bgr2)
+    for key, bgr in [("baseline", bgr1), ("current", bgr2)]:
+
+        if bgr is None:
+            raise ValueError(f"{key} image is None")
+
+        mask = segment_lesion(bgr)
+
+        # ✅ FIX: ensure mask is valid
+        if mask is None or not mask.any():
+            mask = np.zeros(bgr.shape[:2], dtype=np.uint8)
+
+        conf = segmentation_confidence(mask, bgr)
+
+        a = compute_asymmetry(mask)
+        b = compute_border(mask)
+        c_score, c_flags = compute_color(bgr, mask)
+        d = compute_diameter(mask)
+
+        t = tds(a, b, c_score, d)
+        rs, rl = risk_from_tds(t, conf)
+
+        res[key] = {
+            "asymmetry": a,
+            "border": b,
+            "color": c_score,
+            "color_flags": c_flags,
+            "diameter": d,
+            "tds": t,
+            "mask": mask,
+            "conf": conf,
+            "risk_score": rs,
+            "risk_level": rl,
+        }
+
+    # ✅ SAFE similarity
+    sim = similarity_index(bgr1, bgr2)
+
     delta = res["current"]["tds"] - res["baseline"]["tds"]
-    rl    = res["current"]["risk_level"]
-    rs    = res["current"]["risk_score"]
-    conf  = min(res["baseline"]["conf"], res["current"]["conf"])
+
+    rl = res["current"]["risk_level"]
+    rs = res["current"]["risk_score"]
+
+    conf = min(res["baseline"]["conf"], res["current"]["conf"])
 
     flags, ok_flags = [], []
+
+    # ✅ SAFE comparisons (all scalars now)
     if res["current"]["asymmetry"] > res["baseline"]["asymmetry"] + 0.25:
-        flags.append(["Asymmetry increased", "The mole's shape is less symmetric compared to your baseline photo."])
-    else: ok_flags.append("Asymmetry is stable or improved.")
-    if res["current"]["border"] > res["baseline"]["border"] + 0.8:
-        flags.append(["Border more irregular", "The edges appear more ragged or uneven than before."])
-    else: ok_flags.append("Border regularity is unchanged.")
-    new_cols = set(res["current"]["color_flags"]) - set(res["baseline"]["color_flags"])
-    if new_cols:
-        flags.append(["New colour structures", f"New shades detected: {', '.join(new_cols)}."])
-    else: ok_flags.append("No new colours have appeared.")
-    if res["current"]["diameter"] > res["baseline"]["diameter"] + 0.4:
-        flags.append(["Estimated size increased", "The lesion appears larger than in the baseline image."])
-    else: ok_flags.append("Estimated size is stable.")
-    if sim < 65:
-        flags.append(["Low visual similarity", f"Similarity: {sim:.0f}% — significant change or lighting difference."])
-    elif sim < 80:
-        flags.append(["Moderate visual similarity", f"Similarity is {sim:.0f}% — reasonable but worth monitoring."])
-    else: ok_flags.append(f"High visual similarity ({sim:.0f}%) — images look consistent.")
-
-    if delta > 0.5:
-        summary = f"Your mole's score (TDS) increased by {delta:.2f} points — some morphological change has occurred."
-    elif delta < -0.3:
-        summary = f"Your mole's score decreased by {abs(delta):.2f} points — the mole appears more stable."
+        flags.append(["Asymmetry increased", "Shape became less symmetric."])
     else:
-        summary = f"Your mole's score changed by {delta:+.2f} points — relatively stable with minor variation."
+        ok_flags.append("Asymmetry stable")
 
-    risk_plain = {
-        "HIGH":     ("The analysis scored this mole in the higher-concern range. This does NOT mean cancer — "
-                     "many benign moles score here. A dermatologist should examine it in person."),
-        "MODERATE": ("The analysis scored this mole in an intermediate range. It isn't alarming, "
-                     "but has features worth watching. A routine dermatology visit is advised."),
-        "LOW":      ("The analysis scored this mole in the lower-concern range. "
-                     "Continue regular self-checks every 1–3 months."),
-    }
-    actions = {
-        "HIGH":     ["Book a dermatologist appointment within 2–4 weeks.",
-                     "Do not treat or pick at the lesion.",
-                     "Take a new photo every 2 weeks until seen by a doctor.",
-                     "Note symptoms: itching, bleeding, crusting, rapid size change."],
-        "MODERATE": ["Schedule a dermatology check-up within 3 months.",
-                     "Retake comparison photos monthly under the same lighting.",
-                     "Apply broad-spectrum SPF 30+ sunscreen daily.",
-                     "Watch for the ABCDE warning signs."],
-        "LOW":      ["Continue monthly self-examinations.",
-                     "See a dermatologist for a full-body check once a year.",
-                     "Use SPF 30+ sunscreen and protective clothing outdoors.",
-                     "Re-run this tracker in 3–6 months."],
-    }
+    if res["current"]["border"] > res["baseline"]["border"] + 0.8:
+        flags.append(["Border irregular", "Edges more uneven"])
+    else:
+        ok_flags.append("Border stable")
+
+    new_cols = set(res["current"]["color_flags"]) - set(res["baseline"]["color_flags"])
+    if len(new_cols) > 0:
+        flags.append(["New colours", ", ".join(new_cols)])
+    else:
+        ok_flags.append("No new colours")
+
+    if res["current"]["diameter"] > res["baseline"]["diameter"] + 0.4:
+        flags.append(["Size increased", "Lesion larger"])
+    else:
+        ok_flags.append("Size stable")
+
+    if sim < 65:
+        flags.append(["Low similarity", f"{sim:.0f}%"])
+    elif sim < 80:
+        flags.append(["Moderate similarity", f"{sim:.0f}%"])
+    else:
+        ok_flags.append("High similarity")
+
     return {
-        "abcd_baseline": res["baseline"], "abcd_current": res["current"],
-        "similarity_index": sim, "delta_tds": delta,
-        "risk_score": rs, "risk_level": rl, "confidence": conf,
-        "change_summary": summary, "risk_plain": risk_plain[rl],
-        "flags": flags, "ok_flags": ok_flags,
-        "actions": actions[rl], "recommendation": actions[rl][0],
+        "abcd_baseline": res["baseline"],
+        "abcd_current": res["current"],
+        "similarity_index": sim,
+        "delta_tds": delta,
+        "risk_score": rs,
+        "risk_level": rl,
+        "confidence": conf,
+        "flags": flags,
+        "ok_flags": ok_flags,
     }
