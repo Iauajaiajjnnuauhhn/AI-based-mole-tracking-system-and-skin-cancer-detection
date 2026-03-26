@@ -95,7 +95,7 @@ for col, slot, label in [(c1,"cap_baseline","Baseline"), (c2,"cap_current","Curr
         st.markdown(f'<div class="card"><div class="card-label">📷 {label}</div>', unsafe_allow_html=True)
         if st.session_state["camera_permitted"]:
             snap = st.camera_input(f"Take {label} photo", key=f"cam_{label.lower()}")
-            if snap:
+           if snap is not None:
                 st.session_state[slot] = load_camera_image(snap)
                 st.success(f"{label} captured ✅")
         else:
@@ -119,11 +119,15 @@ for col, slot, label in [(u1,"cap_baseline","Baseline"), (u2,"cap_current","Curr
     with col:
         st.markdown(f'<div class="card"><div class="card-label">📂 {label} Upload</div>', unsafe_allow_html=True)
         f = st.file_uploader(f"Upload {label.lower()} photo", type=["jpg","jpeg","png","webp"], key=f"up_{label.lower()}")
-        if f:
+       if f is not None:
             bgr = load_uploaded(f)
             st.session_state[slot] = bgr
             st.image(bgr_to_rgb(bgr), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
+if bgr1 is None or bgr2 is None:
+    st.error("Images not loaded correctly.")
+    st.stop()
 
 # ── Step 3: Analyse ───────────────────────────────────────────────────────────
 st.markdown("""
@@ -135,7 +139,7 @@ st.markdown("""
 bgr1 = st.session_state.get("cap_baseline")
 bgr2 = st.session_state.get("cap_current")
 
-if not bgr1 or not bgr2:
+if bgr1 is None or bgr2 is None:
     st.info("Capture or upload **both** images to enable analysis.", icon="🔬")
     st.stop()
 
