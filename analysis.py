@@ -47,6 +47,14 @@ def _inpaint_hair(bgr):
     hair_mask = cv2.dilate(hair_mask, np.ones((3, 3), np.uint8), iterations=1)
     return cv2.inpaint(bgr, hair_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
 
+
+  def _border_leak(mask, margin=5):
+    top    = mask[:margin, :].any()
+    bottom = mask[-margin:, :].any()
+    left   = mask[:, :margin].any()
+    right  = mask[:, -margin:].any()
+    return bool(top and bottom and left and right)
+
 # ── Multi-cue maps ─────────────────────────────────────────────────────────────
 
 def _cue_lab(bgr):
@@ -183,32 +191,49 @@ def segment_lesion(bgr_orig):
 # ── Confidence ────────────────────────────────────────────────────────────────
 
 def segmentation_confidence(mask, bgr):
-    h, w       = bgr.shape[:2]
+    h, w = bgr.shape[:2]
+
+    if not mask.any():  # ✅ FIX
+        return 0.1
+
     fill_ratio = np.count_nonzero(mask) / (h * w)
+
     if fill_ratio < MIN_FILL or fill_ratio > MAX_FILL:
         return 0.25
+
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return 0.25
-    cnt  = max(contours, key=cv2.contourArea)
+
+    cnt = max(contours, key=cv2.contourArea)
+
     area = cv2.contourArea(cnt)
     peri = cv2.arcLength(cnt, True)
+
     circ = 4 * np.pi * area / (peri ** 2 + 1e-6)
-    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
-    ring    = cv2.bitwise_and(cv2.dilate(mask, kernel), cv2.bitwise_not(mask))
-    if ring.sum() == 0:
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+    ring = cv2.bitwise_and(cv2.dilate(mask, kernel), cv2.bitwise_not(mask))
+
+    if not ring.any():  # ✅ FIX
         contrast = 0.5
     else:
-        l_ch     = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)[:, :, 0].astype(float)
+        l_ch = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)[:, :, 0].astype(float)
         contrast = min(abs(l_ch[mask > 0].mean() - l_ch[ring > 0].mean()) / 50.0, 1.0)
-    hull_area  = cv2.contourArea(cv2.convexHull(cnt))
-    solidity   = area / (hull_area + 1e-6)
-    leak_pen   = 0.4 if _border_leak(mask) else 0.0
-    conf = (0.25 * min(fill_ratio / 0.15, 1.0) +
-            0.25 * min(circ / 0.7, 1.0) +
-            0.30 * contrast +
-            0.20 * min(solidity, 1.0) -
-            leak_pen)
+
+    hull_area = cv2.contourArea(cv2.convexHull(cnt))
+    solidity = area / (hull_area + 1e-6)
+
+    leak_pen = 0.4 if _border_leak(mask) else 0.0
+
+    conf = (
+        0.25 * min(fill_ratio / 0.15, 1.0)
+        + 0.25 * min(circ / 0.7, 1.0)
+        + 0.30 * contrast
+        + 0.20 * min(solidity, 1.0)
+        - leak_pen
+    )
+
     return round(float(np.clip(conf, 0.1, 1.0)), 2)
 
 # ── ABCD metrics ───────────────────────────────────────────────────────────────
@@ -254,16 +279,38 @@ def compute_border(mask):
 def compute_color(bgr, mask):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+
     roi = mask > 0
-    h, s, v = hsv[:, :, 0][roi], hsv[:, :, 1][roi], hsv[:, :, 2][roi]
-    l_ch    = lab[:, :, 0][roi]
-    found   = []
-    if np.mean(v > 200) > 0.04:                                        found.append("White")
-    if np.mean((h < 10) & (s > 80)) > 0.03:                           found.append("Red")
-    if np.mean((h >= 10) & (h < 25) & (s > 40) & (v > 100)) > 0.05:  found.append("Light-brown")
-    if np.mean((h >= 10) & (h < 30) & (v < 120) & (s > 30)) > 0.05:  found.append("Dark-brown")
-    if np.mean((h >= 95) & (h < 140) & (s < 90)) > 0.03:              found.append("Blue-grey")
-    if np.mean(l_ch < 35) > 0.04:                                      found.append("Black")
+
+    # ✅ FIX: handle empty mask
+    if not roi.any():
+        return 1.0, []
+
+    h = hsv[:, :, 0][roi]
+    s = hsv[:, :, 1][roi]
+    v = hsv[:, :, 2][roi]
+    l_ch = lab[:, :, 0][roi]
+
+    found = []
+
+    if np.mean(v > 200) > 0.04:
+        found.append("White")
+
+    if np.mean((h < 10) & (s > 80)) > 0.03:
+        found.append("Red")
+
+    if np.mean((h >= 10) & (h < 25) & (s > 40) & (v > 100)) > 0.05:
+        found.append("Light-brown")
+
+    if np.mean((h >= 10) & (h < 30) & (v < 120) & (s > 30)) > 0.05:
+        found.append("Dark-brown")
+
+    if np.mean((h >= 95) & (h < 140) & (s < 90)) > 0.03:
+        found.append("Blue-grey")
+
+    if np.mean(l_ch < 35) > 0.04:
+        found.append("Black")
+
     return float(max(1, len(found))), found
 
 def compute_diameter(mask, fov_mm=20.0):
