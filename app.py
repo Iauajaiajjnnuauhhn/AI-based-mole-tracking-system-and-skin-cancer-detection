@@ -11,6 +11,25 @@ sys.path.insert(0, os.path.dirname(__file__))
 import db
 import styles
 
+import streamlit as st
+import analysis as ana
+
+# Upload baseline and current images
+baseline = st.file_uploader("Upload baseline image", type=["jpg","png"])
+current  = st.file_uploader("Upload current image", type=["jpg","png"])
+
+if baseline and current:
+    bgr1 = cv2.imdecode(np.frombuffer(baseline.read(), np.uint8), cv2.IMREAD_COLOR)
+    bgr2 = cv2.imdecode(np.frombuffer(current.read(), np.uint8), cv2.IMREAD_COLOR)
+    report = ana.analyse_pair(bgr1, bgr2)
+    st.json(report)
+
+    # Example tracking graph (use dummy dates / TDS values)
+    dates = ["Day 1","Day 15","Day 30"]
+    tds_scores = [report["abcd_baseline"]["tds"], report["abcd_current"]["tds"], report["abcd_current"]["tds"]+0.1]
+    fig_path = ana.plot_tracking(dates, tds_scores)
+    st.image(fig_path, caption="Mole TDS Tracking")
+
 st.set_page_config(
     page_title="DermaScan AI",
     page_icon="🔬",
