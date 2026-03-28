@@ -11,8 +11,23 @@ Features:
 
 import cv2
 import numpy as np
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import img_to_array
+
+# ── Optional TensorFlow (SAFE IMPORT) ─────────────────────────
+MODEL_PATH = "skincancer_mobilenet.h5"
+model = None
+TF_AVAILABLE = False
+
+try:
+    from tensorflow.keras.models import load_model
+    from tensorflow.keras.preprocessing.image import img_to_array
+
+    model = load_model(MODEL_PATH)
+    TF_AVAILABLE = True
+    print("✅ Model loaded successfully")
+
+except Exception as e:
+    print("⚠️ TensorFlow/model not available:", e)
+    model = None
 
 # ── Config ─────────────────────────────────────────────
 WORK_SIZE  = 512
@@ -216,12 +231,23 @@ def risk_from_tds(t,conf=1.0):
 
 # ── MobileNetV2 prediction ─────────────────────────────
 def predict_mole(bgr):
-    img = cv2.resize(bgr,(IMG_SIZE,IMG_SIZE))
-    img = img_to_array(img)/255.0
-    img = np.expand_dims(img,axis=0)
-    pred = float(model.predict(img)[0][0])
-    label = "melanoma" if pred>0.5 else "benign"
-    return label, pred
+    if model is None:
+        return "model_not_loaded", 0.0
+
+    try:
+        IMG_SIZE = 224
+        img = cv2.resize(bgr, (IMG_SIZE, IMG_SIZE))
+        img = img_to_array(img) / 255.0
+        img = np.expand_dims(img, axis=0)
+
+        pred = float(model.predict(img, verbose=0)[0][0])
+        label = "melanoma" if pred > 0.5 else "benign"
+
+        return label, round(pred, 3)
+
+    except Exception as e:
+        print("Prediction error:", e)
+        return "error", 0.0
 
 # ── Full analysis ───────────────────────────────────────
 def analyse_pair(bgr1,bgr2):
