@@ -1,7 +1,7 @@
 streamlit==1.29.0
 opencv-python-headless
 numpy
-Pillow
+Pillow==9.5.0
 streamlit-webrtc
 
 
