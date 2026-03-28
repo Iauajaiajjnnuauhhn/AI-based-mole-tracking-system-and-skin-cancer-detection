@@ -1,31 +1,40 @@
 import streamlit as st
-import matplotlib.pyplot as plt
-from analysis import analyse_pair
 import cv2
 import numpy as np
+from analysis import analyse_pair
+import matplotlib.pyplot as plt
 
-# Example
+st.title("🔬 Mole Scanner")
+
 if "history" not in st.session_state:
     st.session_state.history = []
 
-uploaded1 = st.file_uploader("Upload Baseline Mole Image", type=["jpg","png"])
-uploaded2 = st.file_uploader("Upload Current Mole Image", type=["jpg","png"])
+img1_file = st.file_uploader("Upload Baseline Image", type=["jpg","png"])
+img2_file = st.file_uploader("Upload Current Image", type=["jpg","png"])
 
-if uploaded1 and uploaded2:
-    img1 = cv2.imdecode(np.frombuffer(uploaded1.read(), np.uint8), cv2.IMREAD_COLOR)
-    img2 = cv2.imdecode(np.frombuffer(uploaded2.read(), np.uint8), cv2.IMREAD_COLOR)
+if img1_file and img2_file:
 
-    report = analyse_pair(img1, img2)
-    st.write(report)
+    img1 = cv2.imdecode(np.frombuffer(img1_file.read(), np.uint8), cv2.IMREAD_COLOR)
+    img2 = cv2.imdecode(np.frombuffer(img2_file.read(), np.uint8), cv2.IMREAD_COLOR)
 
-    # Add to history
-    st.session_state.history.append(report["delta_tds"])
+    st.image(img1, caption="Baseline")
+    st.image(img2, caption="Current")
 
-    # Plot tracking graph
+    result = analyse_pair(img1, img2)
+
+    st.subheader("📊 ABCD Report")
+    st.write(result)
+
+    # Save tracking
+    st.session_state.history.append(result["current"]["tds"])
+
+    # Graph
     if len(st.session_state.history) > 1:
-        plt.figure(figsize=(6,3))
+        st.subheader("📈 Tracking Graph")
+
+        plt.figure()
         plt.plot(st.session_state.history, marker='o')
-        plt.title("Mole TDS Tracking Over Time")
-        plt.xlabel("Scan #")
-        plt.ylabel("Delta TDS")
+        plt.xlabel("Scan Number")
+        plt.ylabel("TDS Score")
+
         st.pyplot(plt)
