@@ -89,29 +89,53 @@ def predict_mole(bgr):
     return "not_available", 0.0
 
 # ── MAIN ANALYSIS ─────────────────────────
+def generate_explanation(risk, delta):
+    if risk == "LOW":
+        msg = "The mole appears normal. No immediate concern."
+    elif risk == "MODERATE":
+        msg = "The mole shows some unusual features. Monitoring is recommended."
+    else:
+        msg = "The mole shows warning signs. Please consult a dermatologist."
+
+    if delta > 0.5:
+        msg += " It has changed noticeably over time."
+    elif delta < -0.5:
+        msg += " It has reduced in severity."
+    else:
+        msg += " No major change detected."
+
+    return msg
+
+
 def analyse_pair(img1, img2):
 
-    # ✅ Resize both images to same size
-    img1 = resize_image(img1, 256)
-    img2 = resize_image(img2, 256)
+    img1 = resize_image(img1)
+    img2 = resize_image(img2)
 
     mask1 = segment_lesion(img1)
     mask2 = segment_lesion(img2)
 
     a1 = compute_asymmetry(mask1)
     b1 = compute_border(mask1)
-    c1, cf1 = compute_color(img1, mask1)
+    c1, _ = compute_color(img1, mask1)
     d1 = compute_diameter(mask1)
     t1 = tds(a1,b1,c1,d1)
 
     a2 = compute_asymmetry(mask2)
     b2 = compute_border(mask2)
-    c2, cf2 = compute_color(img2, mask2)
+    c2, _ = compute_color(img2, mask2)
     d2 = compute_diameter(mask2)
     t2 = tds(a2,b2,c2,d2)
 
+    risk = risk_from_tds(t2)
+    delta = round(t2 - t1, 3)
+
+    explanation = generate_explanation(risk, delta)
+
     return {
-        "baseline": {"tds": t1, "risk": risk_from_tds(t1)},
-        "current": {"tds": t2, "risk": risk_from_tds(t2)},
-        "delta": round(t2 - t1, 3)
+        "baseline_tds": t1,
+        "current_tds": t2,
+        "risk": risk,
+        "change": delta,
+        "explanation": explanation
     }
