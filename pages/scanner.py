@@ -18,7 +18,8 @@ if st.button("🗑️ Clear History"):
     history = []
     with open(DATA_FILE, "w") as f:
         json.dump(history, f)
-    st.success("History cleared!")        history = json.load(f)
+    st.success("History cleared!")     
+    history = json.load(f)
 else:
     history = []
 
