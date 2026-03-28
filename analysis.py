@@ -167,7 +167,8 @@ def analyse_pair(img1, img2):
     t2 = tds(a2,b2,c2,d2)
 
     risk = risk_from_tds(t2)
-    delta = round(t2 - t1, 3)
+    delta_raw = t2 - t1
+    delta = round(max(0, delta_raw), 3)
 
     explanation = generate_explanation(risk, delta)
 
