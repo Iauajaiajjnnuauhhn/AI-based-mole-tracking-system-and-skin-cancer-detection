@@ -1,13 +1,22 @@
 import streamlit as st
 import cv2
 import numpy as np
-from analysis import analyse_pair
 import matplotlib.pyplot as plt
+import json
+import os
+from datetime import datetime
+from analysis import analyse_pair
 
 st.title("🔬 Mole Scanner")
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+DATA_FILE = "history.json"
+
+# Load history
+if os.path.exists(DATA_FILE):
+    with open(DATA_FILE, "r") as f:
+        history = json.load(f)
+else:
+    history = []
 
 img1_file = st.file_uploader("Upload Baseline Image", type=["jpg","png"])
 img2_file = st.file_uploader("Upload Current Image", type=["jpg","png"])
@@ -22,19 +31,36 @@ if img1_file and img2_file:
 
     result = analyse_pair(img1, img2)
 
-    st.subheader("📊 ABCD Report")
-    st.write(result)
+    # 📊 USER-FRIENDLY REPORT
+    st.subheader("🩺 Scan Result")
 
-    # Save tracking
-    st.session_state.history.append(result["current"]["tds"])
+    st.write(f"**Risk Level:** {result['risk']}")
+    st.write(f"**Change Score:** {result['change']}")
+    st.info(result["explanation"])
 
-    # Graph
-    if len(st.session_state.history) > 1:
-        st.subheader("📈 Tracking Graph")
+    # 💾 SAVE DATA
+    record = {
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "tds": result["current_tds"],
+        "risk": result["risk"]
+    }
 
-        plt.figure()
-        plt.plot(st.session_state.history, marker='o')
-        plt.xlabel("Scan Number")
-        plt.ylabel("TDS Score")
+    history.append(record)
 
-        st.pyplot(plt)
+    with open(DATA_FILE, "w") as f:
+        json.dump(history, f)
+
+    st.success("✅ Scan saved!")
+
+# 📈 GRAPH
+if len(history) > 1:
+    st.subheader("📈 Progress Tracking")
+
+    tds_values = [h["tds"] for h in history]
+
+    plt.figure()
+    plt.plot(tds_values, marker='o')
+    plt.xlabel("Scan Number")
+    plt.ylabel("TDS Score")
+
+    st.pyplot(plt)
