@@ -41,9 +41,10 @@ if img1_file and img2_file:
 
     # 📊 USER-FRIENDLY REPORT
     st.subheader("🩺 Scan Result")
-
     st.write(f"**Risk Level:** {result['risk']}")
-    st.write(f"**Change Score:** {result['change']}")
+    st.write(f"**TDS Change Score:** {result['delta_tds']}")
+    st.write(f"**Percent Change:** {result['percent_change']}%")
+    st.write(f"**Similarity Index:** {result['similarity_index']}")
     st.info(result["explanation"])
 
     # 💾 SAVE DATA
@@ -54,7 +55,6 @@ if img1_file and img2_file:
     }
 
     history.append(record)
-
     with open(DATA_FILE, "w") as f:
         json.dump(history, f)
 
@@ -63,7 +63,6 @@ if img1_file and img2_file:
 # ── GRAPH ─────────────────────────────────
 if len(history) > 1:
     st.subheader("📈 Progress Tracking")
-
     tds_values = [h["tds"] for h in history]
 
     plt.figure()
@@ -71,7 +70,6 @@ if len(history) > 1:
     plt.xlabel("Scan Number")
     plt.ylabel("TDS Score")
     plt.title("Mole Change Over Time")
-
     st.pyplot(plt)
 else:
     st.info("Upload more scans to see tracking graph")
