@@ -11,20 +11,23 @@ st.title("🔬 Mole Scanner")
 
 DATA_FILE = "history.json"
 
-# Load history
+# ── Load history ─────────────────────────────
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r") as f:
+        history = json.load(f)
+else:
+    history = []
+
+# ── Clear history button ────────────────────
 if st.button("🗑️ Clear History"):
     history = []
     with open(DATA_FILE, "w") as f:
         json.dump(history, f)
-    st.success("History cleared!")     
-    history = json.load(f)
-else:
-    history = []
+    st.success("History cleared!")
 
-img1_file = st.file_uploader("Upload Baseline Image", type=["jpg","png"])
-img2_file = st.file_uploader("Upload Current Image", type=["jpg","png"])
+# ── File upload ─────────────────────────────
+img1_file = st.file_uploader("Upload Baseline Image", type=["jpg", "png"])
+img2_file = st.file_uploader("Upload Current Image", type=["jpg", "png"])
 
 if img1_file and img2_file:
 
@@ -57,7 +60,7 @@ if img1_file and img2_file:
 
     st.success("✅ Scan saved!")
 
-# 📈 GRAPH
+# ── GRAPH ─────────────────────────────────
 if len(history) > 1:
     st.subheader("📈 Progress Tracking")
 
