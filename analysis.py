@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 # ── Optional TensorFlow (SAFE IMPORT) ─────────────────────────
-MODEL_PATH = "skincancer_mobilenet.h5"
+MODEL_PATH = "skin_cancer_mobilenetv2.h5"
 model = None
 TF_AVAILABLE = False
 
@@ -38,7 +38,7 @@ BORDER_PAD = 12
 IMG_SIZE   = 224  # MobileNetV2 input
 
 # Load MobileNetV2 model (must be trained and saved beforehand)
-model = load_model("mole_classifier.h5")
+model = load_model("skin_cancer_mobilenetv2.h5")
 
 # ── Pre-processing ─────────────────────────────────────────────
 
