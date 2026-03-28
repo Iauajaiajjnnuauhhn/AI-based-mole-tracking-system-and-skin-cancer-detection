@@ -3,6 +3,6 @@ opencv-python-headless
 numpy
 Pillow
 streamlit-webrtc
-tensorflow==2.14.0
+
 
 matplotlib
