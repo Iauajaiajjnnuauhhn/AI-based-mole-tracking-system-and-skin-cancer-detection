@@ -1,123 +1,117 @@
-"""
-analysis.py — Mole segmentation + ABCD analysis + MobileNetV2 prediction + safe loading
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Features:
-1. Pre-processing: resize, CLAHE, bilateral filter, hair removal
-2. Multi-cue segmentation + GrabCut refinement
-3. ABCD metrics computation
-4. MobileNetV2 prediction (melanoma vs benign)
-5. Combined report
-"""
-
 import cv2
 import numpy as np
-import os
 
-# ── Config ─────────────────────────────────────────────
-WORK_SIZE  = 512
-MIN_FILL   = 0.01
-MAX_FILL   = 0.80
-GC_ITERS   = 8
-BORDER_PAD = 12
-IMG_SIZE   = 224  # MobileNetV2 input
+def resize_image(bgr, size=256):
+    return cv2.resize(bgr, (size, size))
 
-# ── Safe TensorFlow Import ─────────────────────────────
-MODEL_PATH = "skin_cancer_mobilenetv2.h5"
-
-model = None
-TF_AVAILABLE = False
-
-try:
-    from tensorflow.keras.models import load_model
-    from tensorflow.keras.preprocessing.image import img_to_array
-
-    if os.path.exists(MODEL_PATH):
-        model = load_model(MODEL_PATH)
-        TF_AVAILABLE = True
-        print("✅ Model loaded successfully")
-    else:
-        print(f"⚠️ Model file not found: {MODEL_PATH}")
-
-except Exception as e:
-    print("⚠️ TensorFlow/model not available:", e)
-    model = None
-
-# ── Pre-processing ─────────────────────────────────────
-def _resize_pad(bgr):
-    h, w = bgr.shape[:2]
-    scale = WORK_SIZE / max(h, w)
-    nh, nw = int(h * scale), int(w * scale)
-    return cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA), scale
-
-def _enhance(bgr):
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    bgr_enh = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
-    return cv2.bilateralFilter(bgr_enh, d=9, sigmaColor=75, sigmaSpace=75)
-
-def _inpaint_hair(bgr):
+# ── SIMPLE SEGMENTATION ─────────────────────────
+def segment_lesion(bgr):
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 17))
-    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
-    _, hair_mask = cv2.threshold(blackhat, 10, 255, cv2.THRESH_BINARY)
-    hair_mask = cv2.dilate(hair_mask, np.ones((3,3), np.uint8), iterations=1)
-    return cv2.inpaint(bgr, hair_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+    blur = cv2.GaussianBlur(gray, (7,7), 0)
+    _, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-# ── Multi-cue segmentation ─────────────────────────────
-# ... (keep all your cue functions here: _cue_lab, _cue_hsv, _cue_excess_red, _cue_sat_drop, _centre_prior)
-# ... (keep _ensemble_mask, _clean_mask, _grabcut_refine, segment_lesion as is)
+    mask = cv2.bitwise_not(mask)
 
-# ── ABCD metrics ─────────────────────────────────────
-# ... (keep compute_asymmetry, compute_border, compute_color, compute_diameter, tds, risk_from_tds as is)
+    kernel = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-# ── MobileNetV2 prediction ─────────────────────────────
+    return mask
+
+# ── ABCD FUNCTIONS ─────────────────────────
+def compute_asymmetry(mask):
+    h,w = mask.shape
+    left = mask[:, :w//2]
+    right = cv2.flip(mask[:, w//2:], 1)
+
+    right = cv2.resize(right, (left.shape[1], left.shape[0]))
+
+    diff = np.sum(left != right)
+    total = np.sum(left > 0)
+
+    return round(diff / (total + 1e-6), 3)
+
+def compute_border(mask):
+    contours,_ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0
+
+    cnt = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(cnt)
+    peri = cv2.arcLength(cnt, True)
+
+    return round(peri / (area + 1e-6), 3)
+
+def compute_color(bgr, mask):
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    roi = mask > 0
+
+    if not roi.any():
+        return 1, []
+
+    h = hsv[:,:,0][roi]
+    s = hsv[:,:,1][roi]
+    v = hsv[:,:,2][roi]
+
+    colors = []
+
+    if np.mean(v > 200) > 0.05:
+        colors.append("White")
+    if np.mean((h < 10) & (s > 100)) > 0.05:
+        colors.append("Red")
+    if np.mean(v < 80) > 0.05:
+        colors.append("Dark")
+
+    return max(1, len(colors)), colors
+
+def compute_diameter(mask):
+    contours,_ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0
+
+    cnt = max(contours, key=cv2.contourArea)
+    _,_,w,h = cv2.boundingRect(cnt)
+
+    return round(max(w,h)/50, 2)
+
+def tds(a,b,c,d):
+    return round(a*1.3 + b*0.1 + c*0.5 + d*0.5, 3)
+
+def risk_from_tds(t):
+    if t < 4.75:
+        return "LOW"
+    elif t <= 5.45:
+        return "MODERATE"
+    else:
+        return "HIGH"
+
+# ── SAFE ML PLACEHOLDER ─────────────────────────
 def predict_mole(bgr):
-    if not TF_AVAILABLE or model is None:
-        return "model_not_loaded", 0.0
+    return "not_available", 0.0
 
-    try:
-        img = cv2.resize(bgr, (IMG_SIZE, IMG_SIZE))
-        img = img_to_array(img) / 255.0
-        img = np.expand_dims(img, axis=0)
-        pred = float(model.predict(img, verbose=0)[0][0])
-        label = "melanoma" if pred > 0.5 else "benign"
-        return label, round(pred, 3)
-    except Exception as e:
-        print("Prediction error:", e)
-        return "error", 0.0
+# ── MAIN ANALYSIS ─────────────────────────
+def analyse_pair(img1, img2):
 
-# ── Full analysis ───────────────────────────────────────
-def analyse_pair(bgr1, bgr2):
-    mask1 = segment_lesion(bgr1)
-    mask2 = segment_lesion(bgr2)
+    # ✅ Resize both images to same size
+    img1 = resize_image(img1, 256)
+    img2 = resize_image(img2, 256)
+
+    mask1 = segment_lesion(img1)
+    mask2 = segment_lesion(img2)
 
     a1 = compute_asymmetry(mask1)
     b1 = compute_border(mask1)
-    c1, flags1 = compute_color(bgr1, mask1)
+    c1, cf1 = compute_color(img1, mask1)
     d1 = compute_diameter(mask1)
     t1 = tds(a1,b1,c1,d1)
-    rs1, rl1 = risk_from_tds(t1)
 
     a2 = compute_asymmetry(mask2)
     b2 = compute_border(mask2)
-    c2, flags2 = compute_color(bgr2, mask2)
+    c2, cf2 = compute_color(img2, mask2)
     d2 = compute_diameter(mask2)
     t2 = tds(a2,b2,c2,d2)
-    rs2, rl2 = risk_from_tds(t2)
 
-    label1, conf1 = predict_mole(bgr1)
-    label2, conf2 = predict_mole(bgr2)
-
-    delta_tds = t2-t1
-
-    report = {
-        "abcd_baseline": {"asymmetry":a1,"border":b1,"color":c1,"color_flags":flags1,"diameter":d1,"tds":t1,"risk_score":rs1,"risk_level":rl1},
-        "abcd_current":  {"asymmetry":a2,"border":b2,"color":c2,"color_flags":flags2,"diameter":d2,"tds":t2,"risk_score":rs2,"risk_level":rl2},
-        "ml_prediction": {"baseline":{"label":label1,"confidence":conf1},
-                          "current":{"label":label2,"confidence":conf2}},
-        "delta_tds": delta_tds
+    return {
+        "baseline": {"tds": t1, "risk": risk_from_tds(t1)},
+        "current": {"tds": t2, "risk": risk_from_tds(t2)},
+        "delta": round(t2 - t1, 3)
     }
-
-    return report
