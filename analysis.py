@@ -6,40 +6,75 @@ def resize_image(bgr, size=256):
 
 # ── SIMPLE SEGMENTATION ─────────────────────────
 def segment_lesion(bgr):
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (7,7), 0)
-    _, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Resize for consistency
+    img = cv2.resize(bgr, (256, 256))
 
-    mask = cv2.bitwise_not(mask)
+    # Convert to LAB
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
 
-    kernel = np.ones((5,5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # Enhance contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    l = clahe.apply(l)
+
+    enhanced = cv2.merge([l, a, b])
+    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+
+    # Blur
+    blur = cv2.GaussianBlur(enhanced, (7,7), 0)
+
+    # Convert to grayscale
+    gray = cv2.cvtColor(blur, cv2.COLOR_BGR2GRAY)
+
+    # Otsu threshold
+    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Morphological cleaning
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+
+    # Keep largest contour
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        clean = np.zeros_like(mask)
+        cv2.drawContours(clean, [largest], -1, 255, -1)
+        return clean
 
     return mask
 
 # ── ABCD FUNCTIONS ─────────────────────────
 def compute_asymmetry(mask):
-    h,w = mask.shape
-    left = mask[:, :w//2]
-    right = cv2.flip(mask[:, w//2:], 1)
+    h, w = mask.shape
 
-    right = cv2.resize(right, (left.shape[1], left.shape[0]))
+    flip_h = cv2.flip(mask, 1)
+    flip_v = cv2.flip(mask, 0)
 
-    diff = np.sum(left != right)
-    total = np.sum(left > 0)
+    diff_h = np.sum(mask != flip_h)
+    diff_v = np.sum(mask != flip_v)
 
-    return round(diff / (total + 1e-6), 3)
+    total = np.sum(mask > 0) + 1e-6
+
+    score = (diff_h + diff_v) / (2 * total)
+
+    return round(score * 2, 3)
 
 def compute_border(mask):
-    contours,_ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return 0
 
     cnt = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(cnt)
-    peri = cv2.arcLength(cnt, True)
 
-    return round(peri / (area + 1e-6), 3)
+    area = cv2.contourArea(cnt)
+    perimeter = cv2.arcLength(cnt, True)
+
+    circularity = 4 * np.pi * area / (perimeter**2 + 1e-6)
+
+    irregularity = 1 - circularity
+
+    return round(irregularity * 10, 3)
 
 def compute_color(bgr, mask):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -58,10 +93,12 @@ def compute_color(bgr, mask):
         colors.append("White")
     if np.mean((h < 10) & (s > 100)) > 0.05:
         colors.append("Red")
+    if np.mean((h > 10) & (h < 25)) > 0.05:
+        colors.append("Brown")
     if np.mean(v < 80) > 0.05:
         colors.append("Dark")
 
-    return max(1, len(colors)), colors
+    return len(colors), colors
 
 def compute_diameter(mask):
     contours,_ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -69,17 +106,19 @@ def compute_diameter(mask):
         return 0
 
     cnt = max(contours, key=cv2.contourArea)
-    _,_,w,h = cv2.boundingRect(cnt)
+    x,y,w,h = cv2.boundingRect(cnt)
 
-    return round(max(w,h)/50, 2)
+    diameter = max(w, h)
+
+    return round(diameter / 30, 2)
 
 def tds(a,b,c,d):
     return round(a*1.3 + b*0.1 + c*0.5 + d*0.5, 3)
 
 def risk_from_tds(t):
-    if t < 4.75:
+    if t < 3:
         return "LOW"
-    elif t <= 5.45:
+    elif t < 6:
         return "MODERATE"
     else:
         return "HIGH"
