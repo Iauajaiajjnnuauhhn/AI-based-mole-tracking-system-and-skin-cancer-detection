@@ -167,15 +167,31 @@ def analyse_pair(img1, img2):
     t2 = tds(a2,b2,c2,d2)
 
     risk = risk_from_tds(t2)
-    delta_raw = t2 - t1
-    delta = round(max(0, delta_raw), 3)
+    # ── Compute delta and user-friendly report ──
+delta_tds = max(t2 - t1, 0)  # never negative
+risk_level = rl2
 
-    explanation = generate_explanation(risk, delta)
+if delta_tds == 0:
+    explanation = "No significant change detected since the baseline scan."
+elif delta_tds < 0.5:
+    explanation = "Minimal change detected; monitor regularly."
+elif delta_tds < 1.5:
+    explanation = "Moderate change detected; consider consulting a dermatologist."
+else:
+    explanation = "Significant change detected; immediate medical attention is advised!"
 
-    return {
-        "baseline_tds": t1,
-        "current_tds": t2,
-        "risk": risk,
-        "change": delta,
-        "explanation": explanation
-    }
+# Final result dictionary
+report = {
+    "abcd_baseline": {"asymmetry": a1, "border": b1, "color": c1, "color_flags": flags1,
+                      "diameter": d1, "tds": t1, "risk_score": rs1, "risk_level": rl1},
+    "abcd_current": {"asymmetry": a2, "border": b2, "color": c2, "color_flags": flags2,
+                     "diameter": d2, "tds": t2, "risk_score": rs2, "risk_level": rl2},
+    "ml_prediction": {"baseline": {"label": label1, "confidence": conf1},
+                      "current": {"label": label2, "confidence": conf2}},
+    "delta_tds": delta_tds,
+    "current_tds": t2,
+    "risk": risk_level,
+    "explanation": explanation
+}
+
+return report
