@@ -66,5 +66,8 @@ if len(history) > 1:
     plt.plot(tds_values, marker='o')
     plt.xlabel("Scan Number")
     plt.ylabel("TDS Score")
+    plt.title("Mole Change Over Time")
 
     st.pyplot(plt)
+else:
+    st.info("Upload more scans to see tracking graph")
