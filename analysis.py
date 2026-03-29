@@ -1,40 +1,33 @@
 import cv2
 import numpy as np
+from skimage.metrics import structural_similarity as ssim
 
+# ── Resize ─────────────────────────
 def resize_image(bgr, size=256):
-    return cv2.resize(bgr, (size, size))
+    return cv2.resize(bgr, (size, size), interpolation=cv2.INTER_AREA)
 
-# ── SIMPLE SEGMENTATION ─────────────────────────
+# ── Segmentation ───────────────────
 def segment_lesion(bgr):
-    # Resize for consistency
-    img = cv2.resize(bgr, (256, 256))
+    img = resize_image(bgr)
 
-    # Convert to LAB
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
 
-    # Enhance contrast
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     l = clahe.apply(l)
 
     enhanced = cv2.merge([l, a, b])
     enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
 
-    # Blur
     blur = cv2.GaussianBlur(enhanced, (7,7), 0)
-
-    # Convert to grayscale
     gray = cv2.cvtColor(blur, cv2.COLOR_BGR2GRAY)
 
-    # Otsu threshold
     _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Morphological cleaning
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
 
-    # Keep largest contour
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         largest = max(contours, key=cv2.contourArea)
@@ -44,10 +37,15 @@ def segment_lesion(bgr):
 
     return mask
 
-# ── ABCD FUNCTIONS ─────────────────────────
-def compute_asymmetry(mask):
-    h, w = mask.shape
+# ── Overlay ────────────────────────
+def create_overlay(image, mask):
+    overlay = image.copy()
+    mask_colored = np.zeros_like(image)
+    mask_colored[mask > 0] = [0, 255, 0]
+    return cv2.addWeighted(overlay, 0.7, mask_colored, 0.3, 0)
 
+# ── ABCD ───────────────────────────
+def compute_asymmetry(mask):
     flip_h = cv2.flip(mask, 1)
     flip_v = cv2.flip(mask, 0)
 
@@ -55,10 +53,7 @@ def compute_asymmetry(mask):
     diff_v = np.sum(mask != flip_v)
 
     total = np.sum(mask > 0) + 1e-6
-
-    score = (diff_h + diff_v) / (2 * total)
-
-    return round(score * 2, 3)
+    return round(((diff_h + diff_v) / (2 * total)) * 2, 3)
 
 def compute_border(mask):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -66,15 +61,11 @@ def compute_border(mask):
         return 0
 
     cnt = max(contours, key=cv2.contourArea)
-
     area = cv2.contourArea(cnt)
     perimeter = cv2.arcLength(cnt, True)
 
     circularity = 4 * np.pi * area / (perimeter**2 + 1e-6)
-
-    irregularity = 1 - circularity
-
-    return round(irregularity * 10, 3)
+    return round((1 - circularity) * 10, 3)
 
 def compute_color(bgr, mask):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -101,18 +92,15 @@ def compute_color(bgr, mask):
     return len(colors), colors
 
 def compute_diameter(mask):
-    contours,_ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return 0
 
     cnt = max(contours, key=cv2.contourArea)
-    x,y,w,h = cv2.boundingRect(cnt)
+    x, y, w, h = cv2.boundingRect(cnt)
+    return round(max(w, h) / 30, 2)
 
-    diameter = max(w, h)
-
-    return round(diameter / 30, 2)
-
-def tds(a,b,c,d):
+def tds(a, b, c, d):
     return round(a*1.3 + b*0.1 + c*0.5 + d*0.5, 3)
 
 def risk_from_tds(t):
@@ -123,29 +111,14 @@ def risk_from_tds(t):
     else:
         return "HIGH"
 
-# ── SAFE ML PLACEHOLDER ─────────────────────────
-def predict_mole(bgr):
-    return "not_available", 0.0
+# ── Similarity ─────────────────────
+def compute_similarity(img1, img2):
+    g1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    g2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+    g2 = cv2.resize(g2, (g1.shape[1], g1.shape[0]))
+    return round(ssim(g1, g2), 3)
 
-# ── MAIN ANALYSIS ─────────────────────────
-def generate_explanation(risk, delta):
-    if risk == "LOW":
-        msg = "The mole appears normal. No immediate concern."
-    elif risk == "MODERATE":
-        msg = "The mole shows some unusual features. Monitoring is recommended."
-    else:
-        msg = "The mole shows warning signs. Please consult a dermatologist."
-
-    if delta > 0.5:
-        msg += " It has changed noticeably over time."
-    elif delta < -0.5:
-        msg += " It has reduced in severity."
-    else:
-        msg += " No major change detected."
-
-    return msg
-
-
+# ── MAIN ───────────────────────────
 def analyse_pair(img1, img2):
 
     img1 = resize_image(img1)
@@ -154,44 +127,44 @@ def analyse_pair(img1, img2):
     mask1 = segment_lesion(img1)
     mask2 = segment_lesion(img2)
 
-    a1 = compute_asymmetry(mask1)
-    b1 = compute_border(mask1)
-    c1, _ = compute_color(img1, mask1)
-    d1 = compute_diameter(mask1)
-    t1 = tds(a1,b1,c1,d1)
+    overlay1 = create_overlay(img1, mask1)
+    overlay2 = create_overlay(img2, mask2)
 
-    a2 = compute_asymmetry(mask2)
-    b2 = compute_border(mask2)
-    c2, _ = compute_color(img2, mask2)
-    d2 = compute_diameter(mask2)
-    t2 = tds(a2,b2,c2,d2)
+    # Baseline
+    t1 = tds(
+        compute_asymmetry(mask1),
+        compute_border(mask1),
+        compute_color(img1, mask1)[0],
+        compute_diameter(mask1)
+    )
 
+    # Current
+    t2 = tds(
+        compute_asymmetry(mask2),
+        compute_border(mask2),
+        compute_color(img2, mask2)[0],
+        compute_diameter(mask2)
+    )
+
+    delta = round(max(t2 - t1, 0), 3)
+    percent = round((delta / (t1 + 1e-6)) * 100, 2)
+    similarity = compute_similarity(img1, img2)
     risk = risk_from_tds(t2)
-    # ── Compute delta and user-friendly report ──
-delta_tds = max(t2 - t1, 0)  # never negative
-risk_level = rl2
 
-if delta_tds == 0:
-    explanation = "No significant change detected since the baseline scan."
-elif delta_tds < 0.5:
-    explanation = "Minimal change detected; monitor regularly."
-elif delta_tds < 1.5:
-    explanation = "Moderate change detected; consider consulting a dermatologist."
-else:
-    explanation = "Significant change detected; immediate medical attention is advised!"
+    if delta == 0:
+        explanation = "No significant change detected."
+    elif delta < 0.5:
+        explanation = "Minor change detected. Monitor regularly."
+    else:
+        explanation = "Significant change detected. Consult a doctor."
 
-# Final result dictionary
-report = {
-    "abcd_baseline": {"asymmetry": a1, "border": b1, "color": c1, "color_flags": flags1,
-                      "diameter": d1, "tds": t1, "risk_score": rs1, "risk_level": rl1},
-    "abcd_current": {"asymmetry": a2, "border": b2, "color": c2, "color_flags": flags2,
-                     "diameter": d2, "tds": t2, "risk_score": rs2, "risk_level": rl2},
-    "ml_prediction": {"baseline": {"label": label1, "confidence": conf1},
-                      "current": {"label": label2, "confidence": conf2}},
-    "delta_tds": delta_tds,
-    "current_tds": t2,
-    "risk": risk_level,
-    "explanation": explanation
-}
-
-return report
+    return {
+        "delta_tds": delta,
+        "percent_change": percent,
+        "similarity_index": similarity,
+        "current_tds": t2,
+        "risk": risk,
+        "explanation": explanation,
+        "overlay_baseline": overlay1,
+        "overlay_current": overlay2
+    }
